@@ -1,4 +1,10 @@
-import os, hashlib, pickle, argparse, time, difflib, shutil
+import os
+import hashlib
+import pickle
+import argparse
+import time
+import difflib
+import shutil
 from typing import List, Dict, Union
 
 Blob = bytes
@@ -12,18 +18,30 @@ INDEX_PATH = os.path.join(GITLITE_DIR, "index")
 HEAD_PATH = os.path.join(GITLITE_DIR, "HEAD")
 
 
+class Commit:
+    def __init__(self, message: str, tree_hash: str, parent_commit: Union[str, None]):
+        self.message = message
+        self.tree_hash = tree_hash
+        self.parent_commit = parent_commit
+        self.timestamp = time.time()
+
+    def serialize(self) -> bytes:
+        return pickle.dumps(self)
+
+
 def init():
     if os.path.exists(GITLITE_DIR):
         print("gitLite repository already exists.")
         return
-    
+
     os.makedirs(OBJECTS_DIR)
     os.makedirs(REFS_DIR)
-    
+
     with open(HEAD_PATH, "w") as f:
-        f.write("ref: refs/heads/main") 
-    
+        f.write("ref: refs/heads/main")
+
     print("gitLite repository initialized.")
+
 
 def read_gitliteignore() -> List[str]:
     ignored_files = []
@@ -34,7 +52,7 @@ def read_gitliteignore() -> List[str]:
 
 
 def hash_file(file_path: str) -> str:
-    hasher = hashlib.sha1() 
+    hasher = hashlib.sha1()
     with open(file_path, 'rb') as f:
         while chunk := f.read(8192):
             hasher.update(chunk)
@@ -51,6 +69,29 @@ def load_index() -> Dict[str, str]:
 def save_index(index: Dict[str, str]):
     with open(INDEX_PATH, 'wb') as f:
         pickle.dump(index, f)
+
+
+def get_untracked_files() -> List[str]:
+    index = load_index()
+    tracked_files = set(index.keys())
+
+    ignored_files = read_gitliteignore()
+    untracked_files = []
+
+    for root, dirs, files in os.walk("."):
+        if root == GITLITE_DIR:
+            continue
+
+        for file in files:
+            relative_path = os.path.relpath(os.path.join(root, file), start=".")
+
+            if any([relative_path.startswith(ignored) for ignored in ignored_files]):
+                continue
+
+            if relative_path not in tracked_files:
+                untracked_files.append(relative_path)
+
+    return untracked_files
 
 
 def add(files: List[str]):
@@ -72,7 +113,6 @@ def add(files: List[str]):
             continue
 
         file_hash = hash_file(file_path)
-
         object_dir = os.path.join(OBJECTS_DIR, file_hash[:2])
         os.makedirs(object_dir, exist_ok=True)
         blob_path = os.path.join(object_dir, file_hash[2:])
@@ -88,22 +128,23 @@ def add(files: List[str]):
 
     save_index(index)
 
+
 def status():
     if not os.path.exists(GITLITE_DIR):
         print("No gitLite repository found. Please run 'gitLite init' to initialize a repository.")
         return
-    
+
     if not os.path.exists(HEAD_PATH):
         print("No HEAD file found. The repository may not have been initialized correctly.")
         return
-    
+
     with open(HEAD_PATH, "r") as f:
         head_ref = f.read().strip()
-    
+
     if head_ref.startswith("ref: "):
         branch_ref = head_ref[5:]
         branch_ref_path = os.path.join(GITLITE_DIR, branch_ref)
-        
+
         if os.path.exists(branch_ref_path):
             with open(branch_ref_path, "r") as f:
                 current_commit_hash = f.read().strip()
@@ -114,7 +155,7 @@ def status():
         print("HEAD is not pointing to a valid reference.")
 
     print("Your branch is up to date with 'origin/main'.")
-    
+
     index = load_index()
     staged_files = list(index.keys())
 
@@ -131,7 +172,7 @@ def status():
         print("\nNo files staged for commit.")
 
     untracked_files = get_untracked_files()
-    
+
     if untracked_files:
         print("\nUntracked files:")
         print("  (use \"git add <file>...\" to include in what will be committed)")
@@ -142,37 +183,20 @@ def status():
         print("\nNothing to commit, working tree clean.")
 
 
-def get_untracked_files() -> List[str]:
-    index = load_index()
-    tracked_files = set(index.keys())  # Files that are tracked (i.e., staged)
+def build_tree(index: Dict[str, str]) -> Tree:
+    tree = {}
+    for file_path, file_hash in index.items():
+        object_dir = os.path.join(OBJECTS_DIR, file_hash[:2])
+        blob_path = os.path.join(object_dir, file_hash[2:])
 
-    ignored_files = read_gitliteignore()
-    untracked_files = []
-    
-    for root, dirs, files in os.walk("."):
-        if root == GITLITE_DIR:
-            continue
-        
-        for file in files:
-            relative_path = os.path.relpath(os.path.join(root, file), start=".")
-            
-            if any([relative_path.startswith(ignored) for ignored in ignored_files]):
-                continue
-            
-            if relative_path not in tracked_files:
-                untracked_files.append(relative_path)
-    
-    return untracked_files
+        if os.path.exists(blob_path):
+            with open(blob_path, 'rb') as f:
+                blob = f.read()
+            tree[file_path] = blob
+        else:
+            print(f"Error: Blob for {file_path} not found.")
 
-class Commit:
-    def __init__(self, message: str, tree_hash: str, parent_commit):
-        self.message = message
-        self.tree_hash = tree_hash
-        self.parent_commit = parent_commit
-        self.timestamp = time.time()
-
-    def serialize(self) -> bytes:
-        return pickle.dumps(self)
+    return tree
 
 
 def commit(message: str):
@@ -186,7 +210,7 @@ def commit(message: str):
 
     tree_hash = hashlib.sha1(pickle.dumps(tree)).hexdigest()
     tree_path = os.path.join(OBJECTS_DIR, tree_hash[:2], tree_hash[2:])
-    
+
     if not os.path.exists(tree_path):
         os.makedirs(os.path.dirname(tree_path), exist_ok=True)
         with open(tree_path, 'wb') as f:
@@ -206,7 +230,7 @@ def commit(message: str):
     commit_obj = Commit(message, tree_hash, parent_commit)
     commit_hash = hashlib.sha1(commit_obj.serialize()).hexdigest()
     commit_path = os.path.join(OBJECTS_DIR, commit_hash[:2], commit_hash[2:])
-    
+
     if not os.path.exists(commit_path):
         os.makedirs(os.path.dirname(commit_path), exist_ok=True)
         with open(commit_path, 'wb') as f:
@@ -221,24 +245,9 @@ def commit(message: str):
     save_index({})
 
     print(f"Commit {commit_hash} created successfully.")
-    
-def build_tree(index: Dict[str, str]) -> Tree:
-    tree = {}
-    for file_path, file_hash in index.items():
-        object_dir = os.path.join(OBJECTS_DIR, file_hash[:2])
-        blob_path = os.path.join(object_dir, file_hash[2:])
-        
-        if os.path.exists(blob_path):
-            with open(blob_path, 'rb') as f:
-                blob = f.read()
-            tree[file_path] = blob
-        else:
-            print(f"Error: Blob for {file_path} not found.")
-    
-    return tree
+
 
 def log():
-    """Show commit logs."""
     if not os.path.exists(HEAD_PATH):
         print("No HEAD file found.")
         return
@@ -249,7 +258,7 @@ def log():
     if head_ref.startswith("ref: "):
         branch_ref = head_ref[5:]
         branch_ref_path = os.path.join(GITLITE_DIR, branch_ref)
-        
+
         if os.path.exists(branch_ref_path):
             with open(branch_ref_path, 'r') as f:
                 current_commit_hash = f.read().strip()
@@ -270,29 +279,29 @@ def log():
     else:
         print("HEAD is not pointing to a valid reference.")
 
+
 def checkout(commit_hash: str):
     commit_path = os.path.join(OBJECTS_DIR, commit_hash[:2], commit_hash[2:])
-    
+
     if not os.path.exists(commit_path):
         print(f"Error: Commit {commit_hash} not found.")
         return
-    
+
     with open(commit_path, 'rb') as f:
         commit = pickle.load(f)
-    
+
     tree_hash = commit.tree_hash
-    
     tree_path = os.path.join(OBJECTS_DIR, tree_hash[:2], tree_hash[2:])
-    
+
     if not os.path.exists(tree_path):
         print(f"Error: Tree {tree_hash} not found.")
         return
-    
+
     with open(tree_path, 'rb') as f:
         tree = pickle.load(f)
-    
+
     update_working_directory(tree)
-    
+
     with open(HEAD_PATH, 'w') as f:
         f.write(f"ref: refs/heads/main")
 
@@ -305,17 +314,18 @@ def checkout(commit_hash: str):
 def update_working_directory(tree: Tree, base_path: str = "."):
     for entry, value in tree.items():
         full_path = os.path.join(base_path, entry)
-        
+
         if isinstance(value, bytes):
             with open(full_path, 'wb') as f:
                 f.write(value)
             print(f"Restored file: {full_path}")
-        
-        elif isinstance(value, dict): 
+
+        elif isinstance(value, dict):
             os.makedirs(full_path, exist_ok=True)
             print(f"Restored directory: {full_path}")
             update_working_directory(value, full_path)
-        
+
+
 def diff():
     index = load_index()
 
@@ -329,7 +339,7 @@ def diff():
         if os.path.exists(staged_file):
             staged_file_hash = index[staged_file]
             staged_file_path = os.path.join(OBJECTS_DIR, staged_file_hash[:2], staged_file_hash[2:])
-            
+
             if os.path.exists(staged_file_path):
                 with open(staged_file_path, 'rb') as f:
                     staged_content = f.read().decode('utf-8', 'ignore').splitlines()
@@ -351,14 +361,13 @@ def diff():
         for file in untracked_files:
             print(f"        {file}")
 
+
 def main():
-    """CLI Interface for gitLite."""
     parser = argparse.ArgumentParser(description="gitLite: A Simple Git Implementation")
-    
+
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("init", help="Initialize a new repository")
-
     subparsers.add_parser("status", help="Show the status of the repository")
 
     add_parser = subparsers.add_parser("add", help="Add files to the staging area")
@@ -392,6 +401,7 @@ def main():
         diff()
     else:
         parser.print_help()
+
 
 if __name__ == "__main__":
     main()
